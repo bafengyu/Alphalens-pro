@@ -16,7 +16,14 @@ class IndustryAnalyzer:
     
     def __init__(self):
         self.data_fetcher = IndustryDataFetcher()
-        self.llm_client = get_llm_client()
+        self._llm_client = None
+    
+    @property
+    def llm_client(self):
+        """延迟初始化 LLM 客户端，确保环境变量已加载"""
+        if self._llm_client is None:
+            self._llm_client = get_llm_client()
+        return self._llm_client
         
     def analyze(self, industry_name: str, use_llm: bool = True) -> Dict:
         """

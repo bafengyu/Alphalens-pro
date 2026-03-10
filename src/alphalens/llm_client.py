@@ -484,11 +484,8 @@ _client: Optional[LLMClient] = None
 
 def get_llm_client() -> LLMClient:
     """获取默认 LLM 客户端（使用通义千问）"""
-    global _client
-    if _client is None:
-        # 强制使用通义千问
-        _client = LLMClient.create_dashscope()
-    return _client
+    # 每次都重新创建客户端，确保读取最新的环境变量
+    return LLMClient.create_dashscope()
 
 
 def get_deepseek_client() -> LLMClient:
