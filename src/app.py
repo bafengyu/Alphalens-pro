@@ -601,8 +601,8 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
-    # 检查 API 配置
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+    # 检查 API 配置（支持环境变量和 Streamlit Secrets）
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY") or st.secrets.get("DASHSCOPE_API_KEY")
     if not dashscope_key:
         st.warning("⚠️ 未配置通义千问 API Key，AI 分析功能将不可用。请在 Streamlit Cloud 的 Secrets 中添加 DASHSCOPE_API_KEY")
     else:

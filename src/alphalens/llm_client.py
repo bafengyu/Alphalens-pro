@@ -11,6 +11,19 @@ from loguru import logger
 from pydantic import BaseModel
 
 
+def _get_env_or_secrets(key: str) -> Optional[str]:
+    """从环境变量或 Streamlit Secrets 获取配置"""
+    value = os.getenv(key)
+    if value:
+        return value
+    # 尝试从 Streamlit Secrets 读取
+    try:
+        import streamlit as st
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
+
 # 支持的模型类型
 class ModelType:
     DEEPSEEK = "deepseek"
@@ -140,18 +153,18 @@ class LLMClient:
         """
         config = MODEL_CONFIGS.get(model_type, MODEL_CONFIGS[ModelType.DEEPSEEK])
         
-        # 根据模型类型获取 API Key
+        # 根据模型类型获取 API Key（支持环境变量和 Streamlit Secrets）
         if model_type == ModelType.DEEPSEEK:
-            self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
-            self.base_url = os.getenv("DEEPSEEK_BASE_URL", config["base_url"])
+            self.api_key = api_key or _get_env_or_secrets("DEEPSEEK_API_KEY")
+            self.base_url = _get_env_or_secrets("DEEPSEEK_BASE_URL") or config["base_url"]
         elif model_type == ModelType.DASHSCOPE:
-            self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
-            self.base_url = os.getenv("DASHSCOPE_BASE_URL", config["base_url"])
+            self.api_key = api_key or _get_env_or_secrets("DASHSCOPE_API_KEY")
+            self.base_url = _get_env_or_secrets("DASHSCOPE_BASE_URL") or config["base_url"]
         elif model_type == ModelType.ARK:
-            self.api_key = api_key or os.getenv("ARK_API_KEY")
-            self.base_url = os.getenv("ARK_BASE_URL", config["base_url"])
+            self.api_key = api_key or _get_env_or_secrets("ARK_API_KEY")
+            self.base_url = _get_env_or_secrets("ARK_BASE_URL") or config["base_url"]
         else:
-            self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+            self.api_key = api_key or _get_env_or_secrets("DEEPSEEK_API_KEY")
             self.base_url = config["base_url"]
         
         if not self.api_key:
