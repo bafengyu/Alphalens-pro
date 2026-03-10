@@ -3,7 +3,7 @@ AlphaLens Pro V9.0 - Streamlit 主应用
 AI 驱动的股票深度推理分析系统
 
 特性：
-- DeepSeek V3 大模型深度推理
+- 通义千问大模型深度推理
 - Akshare 实时数据
 - 思维链分析
 - 全面屏沉浸式 UI
@@ -13,9 +13,10 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
+import os
 
 from alphalens.analyzer import IndustryAnalyzer
-from alphalens.data_fetcher import StockDataFetcher
+from alphalens.data_fetcher import IndustryDataFetcher
 
 
 # ==================== V9.0 极致优化：自定义 CSS ====================
@@ -599,6 +600,13 @@ def main():
         </p>
     </div>
     """, unsafe_allow_html=True)
+    
+    # 检查 API 配置
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
+    if not dashscope_key:
+        st.warning("⚠️ 未配置通义千问 API Key，AI 分析功能将不可用。请在 Streamlit Cloud 的 Secrets 中添加 DASHSCOPE_API_KEY")
+    else:
+        st.success("✅ 通义千问 API 已配置")
     
     # 行业选择
     analyzer = IndustryAnalyzer()
