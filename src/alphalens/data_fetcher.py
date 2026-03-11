@@ -208,12 +208,18 @@ class DailyDataCache:
             logger.error(f"[每日缓存] 保存失败: {e}")
     
     def _serialize_data(self, data):
-        """序列化数据（支持DataFrame）"""
+        """序列化数据（支持DataFrame，处理日期类型）"""
         if isinstance(data, pd.DataFrame):
+            # 转换日期列为字符串
+            df_copy = data.copy()
+            for col in df_copy.columns:
+                if pd.api.types.is_datetime64_any_dtype(df_copy[col]):
+                    df_copy[col] = df_copy[col].dt.strftime('%Y-%m-%d')
+            
             return {
                 "_type": "DataFrame",
-                "data": data.to_dict(orient='records'),
-                "columns": list(data.columns)
+                "data": df_copy.to_dict(orient='records'),
+                "columns": list(df_copy.columns)
             }
         return data
     
