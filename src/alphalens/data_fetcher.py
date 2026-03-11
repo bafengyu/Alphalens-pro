@@ -173,16 +173,42 @@ class DailyDataCache:
         cache_file = self._get_cache_file_path(data_type)
         if not force_refresh and os.path.exists(cache_file):
             try:
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    self.memory_cache[data_type] = json.load(f)
-                logger.info(f"[每日缓存] 命中文件缓存: {data_type}")
-                return self._deserialize_data(self.memory_cache[data_type])
+                # 检查文件大小，跳过空文件
+                if os.path.getsize(cache_file) < 100:  # 小于100字节认为是空文件
+                    logger.warning(f"[每日缓存] 缓存文件为空，跳过: {data_type}")
+                    os.remove(cache_file)  # 删除空缓存文件
+                else:
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        cached_data = json.load(f)
+                    
+                    # 检查缓存数据是否有效
+                    if isinstance(cached_data, dict) and cached_data.get("_type") == "DataFrame":
+                        if not cached_data.get("data"):  # 数据为空列表
+                            logger.warning(f"[每日缓存] 缓存数据为空，跳过: {data_type}")
+                            os.remove(cache_file)
+                        else:
+                            self.memory_cache[data_type] = cached_data
+                            logger.info(f"[每日缓存] 命中文件缓存: {data_type}")
+                            return self._deserialize_data(self.memory_cache[data_type])
+                    else:
+                        self.memory_cache[data_type] = cached_data
+                        logger.info(f"[每日缓存] 命中文件缓存: {data_type}")
+                        return self._deserialize_data(self.memory_cache[data_type])
             except Exception as e:
                 logger.warning(f"[每日缓存] 读取文件缓存失败: {e}")
         
         # 首次请求：从API获取数据
         logger.info(f"[每日缓存] 首次获取 {data_type} 数据...")
         data = fetch_func()
+        
+        # 检查数据是否有效（不为空）
+        if isinstance(data, pd.DataFrame):
+            if data.empty:
+                logger.warning(f"[每日缓存] 获取到的数据为空，跳过缓存: {data_type}")
+                return data
+        elif not data:
+            logger.warning(f"[每日缓存] 获取到的数据为空，跳过缓存: {data_type}")
+            return data
         
         # 存储到缓存
         self._save_cache(data_type, data)
