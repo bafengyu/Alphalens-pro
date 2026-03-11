@@ -82,16 +82,24 @@ class DailyDataCache:
     每日数据缓存管理器
     
     功能：
-    1. 当天首次请求时从API获取数据并存储
-    2. 后续请求直接使用缓存数据
+    1. 当天首次请求时从API获取全量数据并存储
+    2. 后续所有LLM分析请求直接从缓存读取数据
     3. 次日自动识别并刷新数据
     4. 支持内存缓存和文件持久化
+    
+    缓存数据类型：
+    - industry_list: 行业板块列表
+    - hot_industries: 热门行业
+    - etf_list: ETF基金列表
+    - industry_daily_<name>: 各行业日线数据
+    - industry_stocks_<name>: 各行业成分股数据
     """
     
     def __init__(self, cache_dir: str = "data_cache"):
         self.cache_dir = cache_dir
         self.memory_cache: Dict[str, Dict] = {}
         self.today = datetime.now().strftime("%Y-%m-%d")
+        self._is_fully_loaded = False  # 标记是否已加载全量数据
         
         # 确保缓存目录存在
         os.makedirs(cache_dir, exist_ok=True)
@@ -104,10 +112,11 @@ class DailyDataCache:
         return os.path.join(self.cache_dir, f"{self.today}_{data_type}.json")
     
     def _load_today_cache(self):
-        """加载今日缓存数据"""
-        cache_types = ["industry_list", "hot_industries", "etf_list"]
+        """加载今日缓存数据（包括所有行业数据）"""
+        # 加载基础数据类型
+        base_types = ["industry_list", "hot_industries", "etf_list"]
         
-        for data_type in cache_types:
+        for data_type in base_types:
             cache_file = self._get_cache_file_path(data_type)
             if os.path.exists(cache_file):
                 try:
@@ -116,6 +125,25 @@ class DailyDataCache:
                     logger.info(f"[每日缓存] 加载 {data_type} 数据")
                 except Exception as e:
                     logger.warning(f"[每日缓存] 加载 {data_type} 失败: {e}")
+        
+        # 加载行业日线数据和成分股数据
+        industry_data_loaded = 0
+        for filename in os.listdir(self.cache_dir):
+            if filename.startswith(self.today) and (
+                "industry_daily_" in filename or "industry_stocks_" in filename
+            ):
+                try:
+                    data_type = filename.replace(f"{self.today}_", "").replace(".json", "")
+                    cache_file = os.path.join(self.cache_dir, filename)
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        self.memory_cache[data_type] = json.load(f)
+                    industry_data_loaded += 1
+                except Exception as e:
+                    logger.warning(f"[每日缓存] 加载行业数据失败: {e}")
+        
+        if industry_data_loaded > 0:
+            logger.info(f"[每日缓存] 加载 {industry_data_loaded} 个行业数据缓存")
+            self._is_fully_loaded = True
     
     def get(self, data_type: str, fetch_func: callable, force_refresh: bool = False):
         """
@@ -215,8 +243,17 @@ class DailyDataCache:
             "today": self.today,
             "memory_items": len(self.memory_cache),
             "cached_types": list(self.memory_cache.keys()),
-            "cache_dir": self.cache_dir
+            "cache_dir": self.cache_dir,
+            "is_fully_loaded": self._is_fully_loaded
         }
+    
+    def is_fully_loaded(self) -> bool:
+        """检查是否已加载全量数据"""
+        return self._is_fully_loaded
+    
+    def mark_fully_loaded(self):
+        """标记全量数据已加载"""
+        self._is_fully_loaded = True
 
 
 class IndustryDataFetcher:
@@ -336,12 +373,13 @@ class IndustryDataFetcher:
             logger.error(f"获取行业列表失败: {e}")
             return pd.DataFrame()
     
-    def get_industry_stocks(self, industry_name: str) -> pd.DataFrame:
+    def get_industry_stocks(self, industry_name: str, use_daily_cache: bool = True) -> pd.DataFrame:
         """
         获取指定行业的成分股
         
         Args:
             industry_name: 行业名称
+            use_daily_cache: 是否使用每日缓存（默认True）
             
         Returns:
             行业成分股 DataFrame
@@ -349,20 +387,32 @@ class IndustryDataFetcher:
         try:
             # 模糊匹配获取正确的板块名称
             matched_name = self._match_industry_name(industry_name)
-            df = ak.stock_board_industry_cons_em(symbol=matched_name)
-            logger.info(f"获取行业 {industry_name}({matched_name}) 成功，共 {len(df)} 只股票")
-            return df
+            
+            # 使用每日缓存
+            if use_daily_cache:
+                cache_key = f"industry_stocks_{matched_name}"
+                return self.daily_cache.get(
+                    cache_key,
+                    lambda: self._fetch_industry_stocks(matched_name)
+                )
+            else:
+                # 直接获取（不使用缓存）
+                df = self._fetch_industry_stocks(matched_name)
+                logger.info(f"获取行业 {industry_name}({matched_name}) 成功，共 {len(df)} 只股票")
+                return df
+                
         except Exception as e:
             logger.error(f"获取行业成分股失败: {e}")
             return pd.DataFrame()
     
-    def get_industry_daily(self, industry_name: str, days: int = 60) -> pd.DataFrame:
+    def get_industry_daily(self, industry_name: str, days: int = 60, use_daily_cache: bool = True) -> pd.DataFrame:
         """
         获取行业日线行情
         
         Args:
             industry_name: 行业名称
             days: 天数
+            use_daily_cache: 是否使用每日缓存（默认True）
             
         Returns:
             行业日线 DataFrame
@@ -370,17 +420,24 @@ class IndustryDataFetcher:
         try:
             # 模糊匹配获取正确的板块名称
             matched_name = self._match_industry_name(industry_name)
-            df = ak.stock_board_industry_hist_em(symbol=matched_name)
             
-            if df is not None and not df.empty:
-                # 转换日期格式
-                if '日期' in df.columns:
-                    df['日期'] = pd.to_datetime(df['日期'])
-                    # 截取最近的数据
+            # 使用每日缓存
+            if use_daily_cache:
+                cache_key = f"industry_daily_{matched_name}"
+                df = self.daily_cache.get(
+                    cache_key,
+                    lambda: self._fetch_industry_daily(matched_name, days)
+                )
+                # 如果缓存数据天数不够，截取所需天数
+                if not df.empty and len(df) > days:
                     df = df.tail(days)
-            
-            logger.info(f"获取行业 {industry_name}({matched_name}) 日线成功，共 {len(df)} 条")
-            return df
+                return df
+            else:
+                # 直接获取（不使用缓存）
+                df = self._fetch_industry_daily(matched_name, days)
+                logger.info(f"获取行业 {industry_name}({matched_name}) 日线成功，共 {len(df)} 条")
+                return df
+                
         except Exception as e:
             logger.error(f"获取行业日线失败: {e}")
             return pd.DataFrame()
@@ -518,12 +575,13 @@ class IndustryDataFetcher:
         
         return keywords_map.get(industry_name, [industry_name])
     
-    def analyze_industry_trend(self, industry_name: str) -> Dict:
+    def analyze_industry_trend(self, industry_name: str, use_daily_cache: bool = True) -> Dict:
         """
-        分析行业趋势
+        分析行业趋势（优先使用缓存数据）
         
         Args:
             industry_name: 行业名称
+            use_daily_cache: 是否使用每日缓存（默认True）
             
         Returns:
             行业分析结果字典
@@ -540,8 +598,8 @@ class IndustryDataFetcher:
         }
         
         try:
-            # 获取行业成分股
-            stocks_df = self.get_industry_stocks(industry_name)
+            # 获取行业成分股（使用缓存）
+            stocks_df = self.get_industry_stocks(industry_name, use_daily_cache=use_daily_cache)
             if not stocks_df.empty:
                 result["stocks_count"] = len(stocks_df)
                 
@@ -551,7 +609,7 @@ class IndustryDataFetcher:
                     result["down_count"] = len(stocks_df[stocks_df['涨跌幅'] < 0])
                     result["avg_change"] = stocks_df['涨跌幅'].mean()
             
-            # 获取资金流向
+            # 获取资金流向（实时数据，不使用缓存）
             fund_df = self.get_industry_fund_flow(industry_name)
             if not fund_df.empty:
                 if '主力净流入-净额' in fund_df.columns:
@@ -585,9 +643,96 @@ class IndustryDataFetcher:
     
     # ==================== 每日缓存管理方法 ====================
     
+    def load_all_industry_data(self, industry_names: List[str] = None):
+        """
+        预加载所有行业数据到缓存（每天首次调用时执行）
+        
+        Args:
+            industry_names: 要预加载的行业列表，为None则使用预设列表
+        """
+        if self.daily_cache.is_fully_loaded():
+            logger.info("[全量缓存] 数据已加载，跳过")
+            return
+        
+        # 默认预设行业列表
+        if industry_names is None:
+            industry_names = [
+                "半导体", "新能源", "医药生物", "食品饮料", "电子元件",
+                "软件服务", "互联网", "通信设备", "银行", "证券",
+                "房地产", "建筑工程", "有色金属", "化工行业", "汽车整车",
+                "电力行业", "军工", "传媒", "环保", "纺织服装"
+            ]
+        
+        logger.info(f"[全量缓存] 开始预加载 {len(industry_names)} 个行业数据...")
+        
+        # 1. 先加载基础数据
+        logger.info("[全量缓存] 1/3 加载行业列表...")
+        self.get_industry_list(use_daily_cache=True)
+        
+        logger.info("[全量缓存] 2/3 加载热门行业...")
+        self.get_hot_industries(use_daily_cache=True)
+        
+        logger.info("[全量缓存] 3/3 加载ETF列表...")
+        self.get_etf_list(use_daily_cache=True)
+        
+        # 2. 预加载所有行业日线数据和成分股数据
+        logger.info(f"[全量缓存] 预加载行业详细数据...")
+        loaded_count = 0
+        
+        for i, industry in enumerate(industry_names, 1):
+            try:
+                # 获取匹配的行业名称
+                matched_name = self._match_industry_name(industry)
+                
+                # 加载日线数据
+                daily_key = f"industry_daily_{matched_name}"
+                if daily_key not in self.daily_cache.memory_cache:
+                    daily_df = self._fetch_industry_daily(matched_name, days=60)
+                    if not daily_df.empty:
+                        self.daily_cache._save_cache(daily_key, daily_df)
+                
+                # 加载成分股数据
+                stocks_key = f"industry_stocks_{matched_name}"
+                if stocks_key not in self.daily_cache.memory_cache:
+                    stocks_df = self._fetch_industry_stocks(matched_name)
+                    if not stocks_df.empty:
+                        self.daily_cache._save_cache(stocks_key, stocks_df)
+                
+                loaded_count += 1
+                if i % 5 == 0 or i == len(industry_names):
+                    logger.info(f"[全量缓存] 进度: {i}/{len(industry_names)} ({loaded_count} 个成功)")
+                    
+            except Exception as e:
+                logger.warning(f"[全量缓存] 加载 {industry} 失败: {e}")
+        
+        self.daily_cache.mark_fully_loaded()
+        logger.info(f"[全量缓存] 完成！共加载 {loaded_count} 个行业数据")
+    
+    def _fetch_industry_daily(self, industry_name: str, days: int = 60) -> pd.DataFrame:
+        """实际获取行业日线数据（用于缓存）"""
+        try:
+            df = ak.stock_board_industry_hist_em(symbol=industry_name)
+            if df is not None and not df.empty and '日期' in df.columns:
+                df['日期'] = pd.to_datetime(df['日期'])
+                df = df.tail(days)
+            return df
+        except Exception as e:
+            logger.error(f"获取行业日线失败: {e}")
+            return pd.DataFrame()
+    
+    def _fetch_industry_stocks(self, industry_name: str) -> pd.DataFrame:
+        """实际获取行业成分股数据（用于缓存）"""
+        try:
+            df = ak.stock_board_industry_cons_em(symbol=industry_name)
+            return df
+        except Exception as e:
+            logger.error(f"获取行业成分股失败: {e}")
+            return pd.DataFrame()
+    
     def clear_daily_cache(self):
         """清空每日数据缓存"""
         self.daily_cache.clear_cache()
+        self.daily_cache._is_fully_loaded = False
     
     def get_daily_cache_stats(self) -> Dict:
         """获取每日缓存统计信息"""
