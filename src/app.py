@@ -407,15 +407,60 @@ def render_ai_recommendations(analyzer: IndustryAnalyzer):
     
     # 如果正在加载
     if st.session_state.ai_recommendations_loading:
-        with st.spinner("🤖 AI 正在分析热门行业，寻找投资机会..."):
-            try:
-                recommendations = analyzer.get_ai_recommendations()
-                st.session_state.ai_recommendations = recommendations
-                st.session_state.ai_recommendations_loading = False
-            except Exception as e:
-                st.error(f"AI分析失败: {e}")
-                st.session_state.ai_recommendations_loading = False
-                return
+        st.markdown("### 🤖 AI 推荐分析进展")
+        
+        # 创建进展状态
+        ai_status_text = st.empty()
+        ai_progress_bar = st.progress(0)
+        ai_detail_text = st.empty()
+        
+        try:
+            # 步骤1: 预加载数据
+            ai_status_text.markdown("⏳ **步骤 1/3**: 预加载行业数据...")
+            ai_progress_bar.progress(15)
+            ai_detail_text.markdown("📥 正在获取行业列表、热门板块、ETF数据...")
+            
+            # 检查缓存状态
+            cache_stats = analyzer.data_fetcher.get_daily_cache_stats()
+            if not cache_stats.get('is_fully_loaded'):
+                ai_detail_text.markdown("📥 首次加载，正在下载全量数据（约需30-60秒）...")
+            else:
+                ai_detail_text.markdown("💾 缓存数据已就绪")
+            
+            ai_progress_bar.progress(30)
+            
+            # 步骤2: 批量分析行业
+            ai_status_text.markdown("🔍 **步骤 2/3**: 批量分析行业数据...")
+            ai_progress_bar.progress(50)
+            ai_detail_text.markdown("📊 正在分析行业趋势、资金流向、技术指标...")
+            
+            # 执行AI推荐（带缓存）
+            recommendations = analyzer.get_ai_recommendations(use_cache=True)
+            
+            ai_progress_bar.progress(75)
+            
+            # 步骤3: AI决策
+            ai_status_text.markdown("🧠 **步骤 3/3**: AI 生成投资建议...")
+            ai_progress_bar.progress(90)
+            ai_detail_text.markdown(f"✅ 已分析完成，筛选出 {len(recommendations)} 个推荐行业")
+            
+            # 完成
+            ai_progress_bar.progress(100)
+            ai_status_text.markdown("✅ **AI 分析完成！**")
+            ai_detail_text.markdown(f"🎯 发现 {len(recommendations)} 个投资机会")
+            
+            st.session_state.ai_recommendations = recommendations
+            st.session_state.ai_recommendations_loading = False
+            
+            st.markdown("---")
+            
+        except Exception as e:
+            ai_progress_bar.progress(100)
+            ai_status_text.markdown("❌ **AI分析失败**")
+            ai_detail_text.markdown(f"错误: {str(e)}")
+            st.error(f"AI分析失败: {e}")
+            st.session_state.ai_recommendations_loading = False
+            return
     
     # 显示推荐结果
     recommendations = st.session_state.ai_recommendations
@@ -653,12 +698,59 @@ def main():
     should_analyze = analyze_btn and is_valid_industry
     
     if should_analyze:
-        with st.spinner("🔄 正在获取行业数据并进行深度分析..."):
-            result = analyzer.analyze(industry_name)
+        # 创建进展状态容器
+        progress_container = st.container()
         
-        if result.get("error"):
-            st.error(f"❌ 分析失败: {result['error']}")
-            return
+        with progress_container:
+            st.markdown("### 📊 分析进展")
+            
+            # 步骤1: 检查/加载缓存
+            status_text = st.empty()
+            progress_bar = st.progress(0)
+            
+            status_text.markdown("⏳ **步骤 1/4**: 检查数据缓存...")
+            progress_bar.progress(10)
+            
+            # 获取缓存统计
+            cache_stats = analyzer.data_fetcher.get_daily_cache_stats()
+            if not cache_stats.get('is_fully_loaded'):
+                status_text.markdown("📥 **步骤 1/4**: 首次加载，正在预加载全量数据...")
+                progress_bar.progress(20)
+            else:
+                status_text.markdown("✅ **步骤 1/4**: 缓存数据已加载")
+                progress_bar.progress(25)
+            
+            # 步骤2: 获取行业数据
+            status_text.markdown("📈 **步骤 2/4**: 获取行业行情数据...")
+            progress_bar.progress(40)
+            
+            # 步骤3: 获取成分股数据
+            status_text.markdown("🔍 **步骤 3/4**: 获取行业成分股数据...")
+            progress_bar.progress(60)
+            
+            # 步骤4: AI深度分析
+            status_text.markdown("🤖 **步骤 4/4**: AI 正在进行深度分析...")
+            progress_bar.progress(80)
+            
+            # 执行分析
+            result = analyzer.analyze(industry_name)
+            
+            # 完成
+            progress_bar.progress(100)
+            
+            # 显示数据来源
+            data_source = result.get('data_source', 'unknown')
+            source_icon = "💾" if data_source == 'cache' else "🌐"
+            source_text = "缓存数据" if data_source == 'cache' else "实时数据"
+            
+            if result.get("error"):
+                status_text.markdown(f"❌ **分析失败**: {result['error']}")
+                st.error(f"❌ 分析失败: {result['error']}")
+                return
+            else:
+                status_text.markdown(f"✅ **分析完成** | 数据来源: {source_icon} {source_text}")
+            
+            st.markdown("---")
         
         # 渲染结果
         st.markdown("---")
