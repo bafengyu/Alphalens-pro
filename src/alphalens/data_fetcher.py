@@ -1,10 +1,17 @@
 """
 Akshare 行业/板块/ETF基金数据获取模块
 获取行业趋势、资金流向、ETF基金投资机会
+
+更新：添加每日数据源缓存机制
+- 当天首次请求获取数据并存储
+- 后续请求直接使用缓存数据
+- 次日自动刷新
 """
 
 import akshare as ak
 import pandas as pd
+import json
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
 from loguru import logger
@@ -36,13 +43,158 @@ INDUSTRY_NAME_MAP = {
 }
 
 
-class IndustryDataFetcher:
-    """行业/板块数据获取器"""
+class DailyDataCache:
+    """
+    每日数据缓存管理器
     
-    def __init__(self):
+    功能：
+    1. 当天首次请求时从API获取数据并存储
+    2. 后续请求直接使用缓存数据
+    3. 次日自动识别并刷新数据
+    4. 支持内存缓存和文件持久化
+    """
+    
+    def __init__(self, cache_dir: str = "data_cache"):
+        self.cache_dir = cache_dir
+        self.memory_cache: Dict[str, Dict] = {}
+        self.today = datetime.now().strftime("%Y-%m-%d")
+        
+        # 确保缓存目录存在
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # 加载今日缓存（如果存在）
+        self._load_today_cache()
+    
+    def _get_cache_file_path(self, data_type: str) -> str:
+        """获取缓存文件路径"""
+        return os.path.join(self.cache_dir, f"{self.today}_{data_type}.json")
+    
+    def _load_today_cache(self):
+        """加载今日缓存数据"""
+        cache_types = ["industry_list", "hot_industries", "etf_list"]
+        
+        for data_type in cache_types:
+            cache_file = self._get_cache_file_path(data_type)
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        self.memory_cache[data_type] = json.load(f)
+                    logger.info(f"[每日缓存] 加载 {data_type} 数据")
+                except Exception as e:
+                    logger.warning(f"[每日缓存] 加载 {data_type} 失败: {e}")
+    
+    def get(self, data_type: str, fetch_func: callable, force_refresh: bool = False):
+        """
+        获取数据（带每日缓存）
+        
+        Args:
+            data_type: 数据类型标识
+            fetch_func: 数据获取函数
+            force_refresh: 强制刷新缓存
+        
+        Returns:
+            数据对象
+        """
+        # 检查日期是否变化（新的一天）
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        if current_date != self.today:
+            logger.info(f"[每日缓存] 日期变化 {self.today} -> {current_date}，重置缓存")
+            self.today = current_date
+            self.memory_cache.clear()
+        
+        # 检查内存缓存
+        if not force_refresh and data_type in self.memory_cache:
+            logger.info(f"[每日缓存] 命中内存缓存: {data_type}")
+            return self._deserialize_data(self.memory_cache[data_type])
+        
+        # 检查文件缓存
+        cache_file = self._get_cache_file_path(data_type)
+        if not force_refresh and os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    self.memory_cache[data_type] = json.load(f)
+                logger.info(f"[每日缓存] 命中文件缓存: {data_type}")
+                return self._deserialize_data(self.memory_cache[data_type])
+            except Exception as e:
+                logger.warning(f"[每日缓存] 读取文件缓存失败: {e}")
+        
+        # 首次请求：从API获取数据
+        logger.info(f"[每日缓存] 首次获取 {data_type} 数据...")
+        data = fetch_func()
+        
+        # 存储到缓存
+        self._save_cache(data_type, data)
+        
+        return data
+    
+    def _save_cache(self, data_type: str, data):
+        """保存数据到缓存"""
+        try:
+            # 序列化数据
+            serialized = self._serialize_data(data)
+            
+            # 内存缓存
+            self.memory_cache[data_type] = serialized
+            
+            # 文件持久化
+            cache_file = self._get_cache_file_path(data_type)
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(serialized, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"[每日缓存] 已保存 {data_type} 数据")
+        except Exception as e:
+            logger.error(f"[每日缓存] 保存失败: {e}")
+    
+    def _serialize_data(self, data):
+        """序列化数据（支持DataFrame）"""
+        if isinstance(data, pd.DataFrame):
+            return {
+                "_type": "DataFrame",
+                "data": data.to_dict(orient='records'),
+                "columns": list(data.columns)
+            }
+        return data
+    
+    def _deserialize_data(self, data):
+        """反序列化数据"""
+        if isinstance(data, dict) and data.get("_type") == "DataFrame":
+            return pd.DataFrame(data["data"], columns=data["columns"])
+        return data
+    
+    def clear_cache(self):
+        """清空所有缓存"""
+        self.memory_cache.clear()
+        
+        # 删除缓存文件
+        for filename in os.listdir(self.cache_dir):
+            if filename.startswith(self.today):
+                try:
+                    os.remove(os.path.join(self.cache_dir, filename))
+                except Exception as e:
+                    logger.warning(f"删除缓存文件失败: {e}")
+        
+        logger.info("[每日缓存] 已清空今日缓存")
+    
+    def get_cache_stats(self) -> Dict:
+        """获取缓存统计信息"""
+        return {
+            "today": self.today,
+            "memory_items": len(self.memory_cache),
+            "cached_types": list(self.memory_cache.keys()),
+            "cache_dir": self.cache_dir
+        }
+
+
+class IndustryDataFetcher:
+    """行业/板块数据获取器（带每日缓存）"""
+    
+    def __init__(self, cache_dir: str = "data_cache"):
         self.cache: Dict = {}
-        self.cache_ttl = 300  # 缓存5分钟
+        self.cache_ttl = 300  # 缓存5分钟（保留原有短周期缓存）
         self._industry_list_cache = None
+        
+        # 每日数据缓存
+        self.daily_cache = DailyDataCache(cache_dir)
     
     def _get_industry_list_cached(self) -> pd.DataFrame:
         """获取行业列表（带缓存）"""
@@ -114,19 +266,36 @@ class IndustryDataFetcher:
         logger.warning(f"未找到匹配的行业: {industry_name}，直接使用")
         return industry_name
     
-    def get_industry_list(self) -> pd.DataFrame:
-        """获取行业板块列表"""
-        cache_key = "industry_list"
+    def get_industry_list(self, use_daily_cache: bool = True) -> pd.DataFrame:
+        """
+        获取行业板块列表
         
-        if cache_key in self.cache:
-            cached_data, cached_time = self.cache[cache_key]
-            if (datetime.now() - cached_time).seconds < self.cache_ttl:
-                return cached_data
+        Args:
+            use_daily_cache: 是否使用每日缓存（默认True）
         
+        Returns:
+            行业板块 DataFrame
+        """
+        if use_daily_cache:
+            # 使用每日缓存：当天首次请求获取，后续使用缓存
+            return self.daily_cache.get(
+                "industry_list",
+                lambda: self._fetch_industry_list()
+            )
+        else:
+            # 使用短周期缓存（原有逻辑）
+            cache_key = "industry_list"
+            if cache_key in self.cache:
+                cached_data, cached_time = self.cache[cache_key]
+                if (datetime.now() - cached_time).seconds < self.cache_ttl:
+                    return cached_data
+            return self._fetch_industry_list()
+    
+    def _fetch_industry_list(self) -> pd.DataFrame:
+        """实际获取行业列表数据"""
         try:
-            # 获取行业板块数据
             df = ak.stock_board_industry_name_em()
-            self.cache[cache_key] = (df, datetime.now())
+            self.cache["industry_list"] = (df, datetime.now())
             logger.info(f"成功获取 {len(df)} 个行业板块")
             return df
         except Exception as e:
@@ -204,8 +373,23 @@ class IndustryDataFetcher:
             # 返回空DataFrame而不是崩溃
             return pd.DataFrame()
     
-    def get_hot_industries(self) -> pd.DataFrame:
-        """获取热门行业板块"""
+    def get_hot_industries(self, use_daily_cache: bool = True) -> pd.DataFrame:
+        """
+        获取热门行业板块
+        
+        Args:
+            use_daily_cache: 是否使用每日缓存（默认True）
+        """
+        if use_daily_cache:
+            return self.daily_cache.get(
+                "hot_industries",
+                lambda: self._fetch_hot_industries()
+            )
+        else:
+            return self._fetch_hot_industries()
+    
+    def _fetch_hot_industries(self) -> pd.DataFrame:
+        """实际获取热门行业数据"""
         try:
             df = ak.stock_board_industry_name_em()
             
@@ -218,19 +402,32 @@ class IndustryDataFetcher:
             logger.error(f"获取热门行业失败: {e}")
             return pd.DataFrame()
     
-    def get_etf_list(self) -> pd.DataFrame:
-        """获取ETF基金列表"""
-        cache_key = "etf_list"
+    def get_etf_list(self, use_daily_cache: bool = True) -> pd.DataFrame:
+        """
+        获取ETF基金列表
         
-        if cache_key in self.cache:
-            cached_data, cached_time = self.cache[cache_key]
-            if (datetime.now() - cached_time).seconds < self.cache_ttl:
-                return cached_data
-        
+        Args:
+            use_daily_cache: 是否使用每日缓存（默认True）
+        """
+        if use_daily_cache:
+            return self.daily_cache.get(
+                "etf_list",
+                lambda: self._fetch_etf_list()
+            )
+        else:
+            # 使用短周期缓存
+            cache_key = "etf_list"
+            if cache_key in self.cache:
+                cached_data, cached_time = self.cache[cache_key]
+                if (datetime.now() - cached_time).seconds < self.cache_ttl:
+                    return cached_data
+            return self._fetch_etf_list()
+    
+    def _fetch_etf_list(self) -> pd.DataFrame:
+        """实际获取ETF列表数据"""
         try:
-            # 获取全部ETF
             df = ak.fund_etf_spot_em()
-            self.cache[cache_key] = (df, datetime.now())
+            self.cache["etf_list"] = (df, datetime.now())
             logger.info(f"成功获取 {len(df)} 只ETF")
             return df
         except Exception as e:
@@ -351,6 +548,38 @@ class IndustryDataFetcher:
             return "观望为主"
         else:
             return "中性持有"
+    
+    # ==================== 每日缓存管理方法 ====================
+    
+    def clear_daily_cache(self):
+        """清空每日数据缓存"""
+        self.daily_cache.clear_cache()
+    
+    def get_daily_cache_stats(self) -> Dict:
+        """获取每日缓存统计信息"""
+        return self.daily_cache.get_cache_stats()
+    
+    def refresh_daily_cache(self, data_type: str = None):
+        """
+        强制刷新每日缓存
+        
+        Args:
+            data_type: 指定刷新类型（industry_list/hot_industries/etf_list），
+                      为None则刷新所有
+        """
+        if data_type:
+            logger.info(f"[每日缓存] 强制刷新 {data_type}")
+            if data_type == "industry_list":
+                self._fetch_industry_list()
+            elif data_type == "hot_industries":
+                self._fetch_hot_industries()
+            elif data_type == "etf_list":
+                self._fetch_etf_list()
+        else:
+            logger.info("[每日缓存] 强制刷新所有数据")
+            self._fetch_industry_list()
+            self._fetch_hot_industries()
+            self._fetch_etf_list()
 
 
 def format_industry_data_for_llm(industry_name: str, analysis: Dict, 
