@@ -653,8 +653,46 @@ def main():
     else:
         st.success("✅ 通义千问 API 已配置")
     
+    # 侧边栏：缓存管理
+    with st.sidebar:
+        st.markdown("### ⚙️ 系统管理")
+        
+        # 显示缓存状态
+        analyzer = IndustryAnalyzer()
+        cache_stats = analyzer.data_fetcher.get_daily_cache_stats()
+        
+        st.markdown("#### 💾 缓存状态")
+        st.markdown(f"- 日期: {cache_stats.get('today', 'N/A')}")
+        st.markdown(f"- 内存项: {cache_stats.get('memory_items', 0)}")
+        st.markdown(f"- 全量加载: {'✅' if cache_stats.get('is_fully_loaded') else '❌'}")
+        
+        # 强制刷新缓存按钮
+        if st.button("🔄 强制刷新缓存", use_container_width=True, type="secondary"):
+            with st.spinner("正在清空缓存并重新加载数据..."):
+                try:
+                    # 清空每日缓存
+                    analyzer.data_fetcher.clear_daily_cache()
+                    # 重置数据源（尝试回到主数据源）
+                    analyzer.data_fetcher.reset_to_primary()
+                    st.success("✅ 缓存已清空！下次分析时将重新获取数据。")
+                    st.info("💡 提示：页面将自动刷新以应用更改")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 刷新缓存失败: {e}")
+        
+        # 显示当前数据源状态
+        if analyzer.data_fetcher.is_using_backup():
+            st.error("⚠️ 当前使用备用数据源（模拟数据）")
+            if st.button("🔄 尝试切换回主数据源", use_container_width=True):
+                analyzer.data_fetcher.reset_to_primary()
+                st.success("✅ 已重置，下次请求将尝试主数据源")
+                st.rerun()
+        else:
+            st.success("✅ 当前使用主数据源（akshare）")
+        
+        st.markdown("---")
+    
     # 行业选择
-    analyzer = IndustryAnalyzer()
     
     # 常用行业列表
     common_industries = [
