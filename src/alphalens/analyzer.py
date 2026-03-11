@@ -12,11 +12,12 @@ from .llm_client import LLMClient, DecisionSignal, get_llm_client
 
 
 class IndustryAnalyzer:
-    """股票分析引擎"""
+    """股票分析引擎（带全量数据缓存）"""
     
     def __init__(self):
         self.data_fetcher = IndustryDataFetcher()
         self._llm_client = None
+        self._data_preloaded = False  # 标记是否已预加载数据
     
     @property
     def llm_client(self):
@@ -24,19 +25,29 @@ class IndustryAnalyzer:
         if self._llm_client is None:
             self._llm_client = get_llm_client()
         return self._llm_client
+    
+    def _ensure_data_preloaded(self):
+        """确保全量数据已预加载（每天首次分析时执行）"""
+        if not self._data_preloaded:
+            logger.info("[分析引擎] 首次分析，预加载全量数据...")
+            self.data_fetcher.load_all_industry_data()
+            self._data_preloaded = True
+            logger.info("[分析引擎] 全量数据预加载完成")
         
-    def analyze(self, industry_name: str, use_llm: bool = True) -> Dict:
+    def analyze(self, industry_name: str, use_llm: bool = True, 
+                use_cache: bool = True) -> Dict:
         """
-        分析单个行业
+        分析单个行业（优先从缓存获取数据）
         
         Args:
             industry_name: 行业名称
             use_llm: 是否使用 LLM 分析
+            use_cache: 是否优先使用缓存数据（默认True）
             
         Returns:
             分析结果字典
         """
-        logger.info(f"开始分析行业: {industry_name}")
+        logger.info(f"开始分析行业: {industry_name} (use_cache={use_cache})")
         
         result = {
             "industry_name": industry_name,
@@ -44,21 +55,39 @@ class IndustryAnalyzer:
             "etf_list": None,
             "daily_data": None,
             "llm_signal": None,
-            "error": None
+            "error": None,
+            "data_source": "unknown"  # 标记数据来源：cache/online
         }
         
         try:
-            # 1. 分析行业趋势
-            analysis = self.data_fetcher.analyze_industry_trend(industry_name)
+            # 确保全量数据已预加载
+            if use_cache:
+                self._ensure_data_preloaded()
+            
+            # 1. 分析行业趋势（优先从缓存）
+            analysis = self.data_fetcher.analyze_industry_trend(
+                industry_name, 
+                use_daily_cache=use_cache
+            )
             result["industry_analysis"] = analysis
             
-            # 2. 获取相关ETF列表
+            # 2. 获取相关ETF列表（优先从缓存）
             etf_df = self.data_fetcher.get_industry_etfs(industry_name)
             result["etf_list"] = etf_df
             
-            # 3. 获取行业日线数据
-            daily_df = self.data_fetcher.get_industry_daily(industry_name, 60)
+            # 3. 获取行业日线数据（优先从缓存）
+            daily_df = self.data_fetcher.get_industry_daily(
+                industry_name, 
+                days=60,
+                use_daily_cache=use_cache
+            )
             result["daily_data"] = daily_df
+            
+            # 标记数据来源
+            if use_cache and not daily_df.empty:
+                result["data_source"] = "cache"
+            elif not daily_df.empty:
+                result["data_source"] = "online"
             
             # 4. LLM 深度分析
             if use_llm:
@@ -75,7 +104,7 @@ class IndustryAnalyzer:
                 )
                 result["llm_signal"] = signal
             
-            logger.info(f"行业分析完成: {industry_name}")
+            logger.info(f"行业分析完成: {industry_name} (来源: {result['data_source']})")
             
         except Exception as e:
             logger.error(f"行业分析异常: {e}")
@@ -100,12 +129,14 @@ class IndustryAnalyzer:
             logger.error(f"获取热门行业失败: {e}")
             return pd.DataFrame()
     
-    def get_ai_recommendations(self, industries: List[str] = None) -> List[Dict]:
+    def get_ai_recommendations(self, industries: List[str] = None, 
+                                  use_cache: bool = True) -> List[Dict]:
         """
         获取AI推荐行业（建议买入/定投的行业）
         
         Args:
             industries: 行业列表，默认分析热门行业
+            use_cache: 是否使用缓存数据（默认True，首次会预加载全量数据）
             
         Returns:
             推荐行业列表
@@ -118,11 +149,28 @@ class IndustryAnalyzer:
             else:
                 industries = ["半导体", "新能源", "医药生物", "食品饮料", "电子元件"]
         
-        recommendations = []
+        logger.info(f"[AI推荐] 开始分析 {len(industries)} 个行业 (use_cache={use_cache})")
         
-        for industry in industries:
+        # 预加载全量数据（如果启用缓存）
+        if use_cache:
+            self._ensure_data_preloaded()
+        
+        recommendations = []
+        cache_hits = 0
+        online_hits = 0
+        
+        for i, industry in enumerate(industries, 1):
             try:
-                result = self.analyze(industry, use_llm=True)
+                logger.info(f"[AI推荐] 分析进度: {i}/{len(industries)} - {industry}")
+                
+                result = self.analyze(industry, use_llm=True, use_cache=use_cache)
+                
+                # 统计数据来源
+                if result.get('data_source') == 'cache':
+                    cache_hits += 1
+                elif result.get('data_source') == 'online':
+                    online_hits += 1
+                
                 signal = result.get('llm_signal')
                 
                 if signal and signal.decision:
@@ -134,7 +182,8 @@ class IndustryAnalyzer:
                             "confidence": signal.confidence,
                             "reasoning": signal.reasoning[:200] if signal.reasoning else "",
                             "etf_list": result.get('etf_list'),
-                            "analysis": result.get('industry_analysis', {})
+                            "analysis": result.get('industry_analysis', {}),
+                            "data_source": result.get('data_source', 'unknown')
                         })
             except Exception as e:
                 logger.warning(f"分析行业 {industry} 失败: {e}")
@@ -142,6 +191,9 @@ class IndustryAnalyzer:
         
         # 按置信度排序
         recommendations.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+        
+        logger.info(f"[AI推荐] 完成！推荐 {len(recommendations)} 个行业 "
+                   f"(缓存命中: {cache_hits}, 线上获取: {online_hits})")
         
         return recommendations[:5]  # 最多返回5个推荐
     
