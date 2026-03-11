@@ -738,10 +738,20 @@ def main():
             # 完成
             progress_bar.progress(100)
             
+            # 检查是否使用备用数据源
+            is_backup = analyzer.data_fetcher.is_using_backup()
+            
             # 显示数据来源
             data_source = result.get('data_source', 'unknown')
-            source_icon = "💾" if data_source == 'cache' else "🌐"
-            source_text = "缓存数据" if data_source == 'cache' else "实时数据"
+            if is_backup:
+                source_icon = "⚠️"
+                source_text = "演示数据（主数据源不可用）"
+            elif data_source == 'cache':
+                source_icon = "💾"
+                source_text = "缓存数据"
+            else:
+                source_icon = "🌐"
+                source_text = "实时数据"
             
             if result.get("error"):
                 status_text.markdown(f"❌ **分析失败**: {result['error']}")
@@ -749,6 +759,10 @@ def main():
                 return
             else:
                 status_text.markdown(f"✅ **分析完成** | 数据来源: {source_icon} {source_text}")
+                
+            # 如果使用备用数据源，显示警告
+            if is_backup:
+                st.warning("⚠️ 当前使用演示数据（模拟数据）。主数据源暂时不可用，请检查网络连接或稍后重试。")
             
             st.markdown("---")
         

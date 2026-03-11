@@ -311,15 +311,76 @@ class DailyDataCache:
 
 
 class IndustryDataFetcher:
-    """行业/板块数据获取器（带每日缓存）"""
+    """行业/板块数据获取器（带每日缓存和备用数据源）"""
     
-    def __init__(self, cache_dir: str = "data_cache"):
+    def __init__(self, cache_dir: str = None):
         self.cache: Dict = {}
         self.cache_ttl = 300  # 缓存5分钟（保留原有短周期缓存）
         self._industry_list_cache = None
         
         # 每日数据缓存
         self.daily_cache = DailyDataCache(cache_dir)
+        
+        # 备用数据源（主数据源失败时使用）
+        self._backup_fetcher = None
+        self._use_backup = False
+    
+    def _get_backup_fetcher(self):
+        """延迟初始化备用数据源"""
+        if self._backup_fetcher is None:
+            from .backup_data_fetcher import BackupDataFetcher
+            self._backup_fetcher = BackupDataFetcher()
+        return self._backup_fetcher
+    
+    def _try_with_backup(self, fetch_func, backup_func_name: str, *args, **kwargs):
+        """
+        尝试使用主数据源获取数据，失败时切换到备用数据源
+        
+        Args:
+            fetch_func: 主数据源获取函数
+            backup_func_name: 备用数据源方法名
+            *args, **kwargs: 传递给获取函数的参数
+        
+        Returns:
+            获取的数据
+        """
+        # 如果已经在使用备用数据源，直接使用备用
+        if self._use_backup:
+            backup_method = getattr(self._get_backup_fetcher(), backup_func_name)
+            return backup_method(*args, **kwargs)
+        
+        # 尝试主数据源
+        try:
+            result = fetch_func()
+            
+            # 检查结果是否有效
+            if isinstance(result, pd.DataFrame):
+                if not result.empty:
+                    return result
+                else:
+                    logger.warning("[数据获取] 主数据源返回空数据")
+            elif result:
+                return result
+            else:
+                logger.warning("[数据获取] 主数据源返回空数据")
+                
+        except Exception as e:
+            logger.error(f"[数据获取] 主数据源失败: {e}")
+        
+        # 切换到备用数据源
+        logger.warning("[数据获取] 切换到备用数据源")
+        self._use_backup = True
+        backup_method = getattr(self._get_backup_fetcher(), backup_func_name)
+        return backup_method(*args, **kwargs)
+    
+    def is_using_backup(self) -> bool:
+        """检查是否正在使用备用数据源"""
+        return self._use_backup
+    
+    def reset_to_primary(self):
+        """重置回主数据源（下次请求时尝试）"""
+        self._use_backup = False
+        logger.info("[数据获取] 已重置回主数据源")
     
     def _get_industry_list_cached(self) -> pd.DataFrame:
         """获取行业列表（带缓存）"""
@@ -417,15 +478,14 @@ class IndustryDataFetcher:
             return self._fetch_industry_list()
     
     def _fetch_industry_list(self) -> pd.DataFrame:
-        """实际获取行业列表数据"""
-        try:
+        """实际获取行业列表数据（带备用数据源）"""
+        def _fetch():
             df = ak.stock_board_industry_name_em()
             self.cache["industry_list"] = (df, datetime.now())
             logger.info(f"成功获取 {len(df)} 个行业板块")
             return df
-        except Exception as e:
-            logger.error(f"获取行业列表失败: {e}")
-            return pd.DataFrame()
+        
+        return self._try_with_backup(_fetch, 'get_industry_list')
     
     def get_industry_stocks(self, industry_name: str, use_daily_cache: bool = True) -> pd.DataFrame:
         """
@@ -534,8 +594,8 @@ class IndustryDataFetcher:
             return self._fetch_hot_industries()
     
     def _fetch_hot_industries(self) -> pd.DataFrame:
-        """实际获取热门行业数据"""
-        try:
+        """实际获取热门行业数据（带备用数据源）"""
+        def _fetch():
             df = ak.stock_board_industry_name_em()
             
             # 按今日涨幅排序，获取热门行业
@@ -543,9 +603,8 @@ class IndustryDataFetcher:
                 df = df.sort_values('涨跌幅', ascending=False)
             
             return df.head(10)
-        except Exception as e:
-            logger.error(f"获取热门行业失败: {e}")
-            return pd.DataFrame()
+        
+        return self._try_with_backup(_fetch, 'get_hot_industries')
     
     def get_etf_list(self, use_daily_cache: bool = True) -> pd.DataFrame:
         """
@@ -569,15 +628,14 @@ class IndustryDataFetcher:
             return self._fetch_etf_list()
     
     def _fetch_etf_list(self) -> pd.DataFrame:
-        """实际获取ETF列表数据"""
-        try:
+        """实际获取ETF列表数据（带备用数据源）"""
+        def _fetch():
             df = ak.fund_etf_spot_em()
             self.cache["etf_list"] = (df, datetime.now())
             logger.info(f"成功获取 {len(df)} 只ETF")
             return df
-        except Exception as e:
-            logger.error(f"获取ETF列表失败: {e}")
-            return pd.DataFrame()
+        
+        return self._try_with_backup(_fetch, 'get_etf_list')
     
     def get_industry_etfs(self, industry_name: str) -> pd.DataFrame:
         """
@@ -763,25 +821,22 @@ class IndustryDataFetcher:
         logger.info(f"[全量缓存] 完成！共加载 {loaded_count} 个行业数据")
     
     def _fetch_industry_daily(self, industry_name: str, days: int = 60) -> pd.DataFrame:
-        """实际获取行业日线数据（用于缓存）"""
-        try:
+        """实际获取行业日线数据（带备用数据源）"""
+        def _fetch():
             df = ak.stock_board_industry_hist_em(symbol=industry_name)
             if df is not None and not df.empty and '日期' in df.columns:
                 df['日期'] = pd.to_datetime(df['日期'])
                 df = df.tail(days)
             return df
-        except Exception as e:
-            logger.error(f"获取行业日线失败: {e}")
-            return pd.DataFrame()
+        
+        return self._try_with_backup(_fetch, 'get_industry_daily', industry_name, days=days)
     
     def _fetch_industry_stocks(self, industry_name: str) -> pd.DataFrame:
-        """实际获取行业成分股数据（用于缓存）"""
-        try:
-            df = ak.stock_board_industry_cons_em(symbol=industry_name)
-            return df
-        except Exception as e:
-            logger.error(f"获取行业成分股失败: {e}")
-            return pd.DataFrame()
+        """实际获取行业成分股数据（带备用数据源）"""
+        def _fetch():
+            return ak.stock_board_industry_cons_em(symbol=industry_name)
+        
+        return self._try_with_backup(_fetch, 'get_industry_stocks', industry_name)
     
     def clear_daily_cache(self):
         """清空每日数据缓存"""
