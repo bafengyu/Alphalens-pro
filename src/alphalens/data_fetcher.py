@@ -95,20 +95,34 @@ class DailyDataCache:
     - industry_stocks_<name>: 各行业成分股数据
     """
     
-    def __init__(self, cache_dir: str = "data_cache"):
+    def __init__(self, cache_dir: str = None):
+        # 自动选择缓存目录：优先使用 /tmp（Streamlit Cloud 可写），否则使用本地 data_cache
+        if cache_dir is None:
+            if os.path.exists("/tmp"):
+                cache_dir = "/tmp/alphalens_cache"
+            else:
+                cache_dir = "data_cache"
+        
         self.cache_dir = cache_dir
         self.memory_cache: Dict[str, Dict] = {}
         self.today = datetime.now().strftime("%Y-%m-%d")
         self._is_fully_loaded = False  # 标记是否已加载全量数据
         
         # 确保缓存目录存在
-        os.makedirs(cache_dir, exist_ok=True)
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"[每日缓存] 创建缓存目录失败: {e}，将仅使用内存缓存")
+            self.cache_dir = None  # 禁用文件缓存
         
         # 加载今日缓存（如果存在）
-        self._load_today_cache()
+        if self.cache_dir:
+            self._load_today_cache()
     
     def _get_cache_file_path(self, data_type: str) -> str:
         """获取缓存文件路径"""
+        if self.cache_dir is None:
+            raise ValueError("缓存目录未设置")
         return os.path.join(self.cache_dir, f"{self.today}_{data_type}.json")
     
     def _load_today_cache(self):
@@ -169,31 +183,32 @@ class DailyDataCache:
             logger.info(f"[每日缓存] 命中内存缓存: {data_type}")
             return self._deserialize_data(self.memory_cache[data_type])
         
-        # 检查文件缓存
-        cache_file = self._get_cache_file_path(data_type)
-        if not force_refresh and os.path.exists(cache_file):
+        # 检查文件缓存（如果缓存目录可用）
+        if self.cache_dir and not force_refresh:
             try:
-                # 检查文件大小，跳过空文件
-                if os.path.getsize(cache_file) < 100:  # 小于100字节认为是空文件
-                    logger.warning(f"[每日缓存] 缓存文件为空，跳过: {data_type}")
-                    os.remove(cache_file)  # 删除空缓存文件
-                else:
-                    with open(cache_file, 'r', encoding='utf-8') as f:
-                        cached_data = json.load(f)
-                    
-                    # 检查缓存数据是否有效
-                    if isinstance(cached_data, dict) and cached_data.get("_type") == "DataFrame":
-                        if not cached_data.get("data"):  # 数据为空列表
-                            logger.warning(f"[每日缓存] 缓存数据为空，跳过: {data_type}")
-                            os.remove(cache_file)
+                cache_file = self._get_cache_file_path(data_type)
+                if os.path.exists(cache_file):
+                    # 检查文件大小，跳过空文件
+                    if os.path.getsize(cache_file) < 100:  # 小于100字节认为是空文件
+                        logger.warning(f"[每日缓存] 缓存文件为空，跳过: {data_type}")
+                        os.remove(cache_file)  # 删除空缓存文件
+                    else:
+                        with open(cache_file, 'r', encoding='utf-8') as f:
+                            cached_data = json.load(f)
+                        
+                        # 检查缓存数据是否有效
+                        if isinstance(cached_data, dict) and cached_data.get("_type") == "DataFrame":
+                            if not cached_data.get("data"):  # 数据为空列表
+                                logger.warning(f"[每日缓存] 缓存数据为空，跳过: {data_type}")
+                                os.remove(cache_file)
+                            else:
+                                self.memory_cache[data_type] = cached_data
+                                logger.info(f"[每日缓存] 命中文件缓存: {data_type}")
+                                return self._deserialize_data(self.memory_cache[data_type])
                         else:
                             self.memory_cache[data_type] = cached_data
                             logger.info(f"[每日缓存] 命中文件缓存: {data_type}")
                             return self._deserialize_data(self.memory_cache[data_type])
-                    else:
-                        self.memory_cache[data_type] = cached_data
-                        logger.info(f"[每日缓存] 命中文件缓存: {data_type}")
-                        return self._deserialize_data(self.memory_cache[data_type])
             except Exception as e:
                 logger.warning(f"[每日缓存] 读取文件缓存失败: {e}")
         
@@ -224,12 +239,14 @@ class DailyDataCache:
             # 内存缓存
             self.memory_cache[data_type] = serialized
             
-            # 文件持久化
-            cache_file = self._get_cache_file_path(data_type)
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(serialized, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"[每日缓存] 已保存 {data_type} 数据")
+            # 文件持久化（如果缓存目录可用）
+            if self.cache_dir:
+                cache_file = self._get_cache_file_path(data_type)
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(serialized, f, ensure_ascii=False, indent=2)
+                logger.info(f"[每日缓存] 已保存 {data_type} 数据")
+            else:
+                logger.info(f"[每日缓存] 已保存 {data_type} 数据到内存（无文件缓存）")
         except Exception as e:
             logger.error(f"[每日缓存] 保存失败: {e}")
     
@@ -259,15 +276,20 @@ class DailyDataCache:
         """清空所有缓存"""
         self.memory_cache.clear()
         
-        # 删除缓存文件
-        for filename in os.listdir(self.cache_dir):
-            if filename.startswith(self.today):
-                try:
-                    os.remove(os.path.join(self.cache_dir, filename))
-                except Exception as e:
-                    logger.warning(f"删除缓存文件失败: {e}")
-        
-        logger.info("[每日缓存] 已清空今日缓存")
+        # 删除缓存文件（如果缓存目录可用）
+        if self.cache_dir:
+            try:
+                for filename in os.listdir(self.cache_dir):
+                    if filename.startswith(self.today):
+                        try:
+                            os.remove(os.path.join(self.cache_dir, filename))
+                        except Exception as e:
+                            logger.warning(f"删除缓存文件失败: {e}")
+                logger.info("[每日缓存] 已清空今日缓存")
+            except Exception as e:
+                logger.warning(f"清空缓存目录失败: {e}")
+        else:
+            logger.info("[每日缓存] 已清空内存缓存（无文件缓存）")
     
     def get_cache_stats(self) -> Dict:
         """获取缓存统计信息"""
