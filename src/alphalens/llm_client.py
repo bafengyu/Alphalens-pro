@@ -40,7 +40,7 @@ MODEL_CONFIGS = {
     },
     ModelType.DASHSCOPE: {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen-plus",
+        "model": "qwen-plus-2025-07-28",
     },
     ModelType.ARK: {
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
